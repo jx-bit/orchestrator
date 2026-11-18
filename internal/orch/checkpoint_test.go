@@ -133,6 +133,11 @@ func TestPauseCheckpointModeAndPolicyArgv(t *testing.T) {
 			}) {
 				t.Fatalf("paused sandbox = %+v", stored)
 			}
+			// Ownership cleanup now runs on the coalesced retry worker after the
+			// response; wait for the worker to drain before asserting side effects.
+			waitForSandbox(t, o, context.Background(), sb.ID, func(current *types.Sandbox) bool {
+				return current.State == types.StatePaused && !pausedCleanupPending(current)
+			}, "paused ownership cleanup after snapshot pause")
 			if launcher.stops.Load() != 1 || vs.detaches.Load() != 1 {
 				t.Fatalf("stop/detach = %d/%d, want 1/1", launcher.stops.Load(), vs.detaches.Load())
 			}
@@ -153,6 +158,11 @@ func TestPauseSandboxCaptureAndTTLAutoPauseSelection(t *testing.T) {
 			if got, _ := splitNamedCheckpointArgs(t, readCheckpointArgs(t, argsPath)); !reflect.DeepEqual(got, want) {
 				t.Fatalf("export argv = %#v, want %#v", got, want)
 			}
+			// Cleanup is asynchronous after the response; wait for the retry
+			// worker to fence the runner and detach the port before asserting.
+			waitForSandbox(t, o, context.Background(), sb.ID, func(current *types.Sandbox) bool {
+				return current.State == types.StatePaused && !pausedCleanupPending(current)
+			}, "paused ownership cleanup after sandbox pause")
 			stored, err := o.st.Get(context.Background(), sb.ID)
 			if err != nil || stored == nil || stored.State != types.StatePaused || stored.ResumeSource != (types.ResumeSource{
 				Kind: types.ResumeSourceSandbox, Ref: checkpointSandboxRef,
@@ -354,8 +364,16 @@ func TestAcceptedPauseSurvivesCancellationAndDrainsAtShutdown(t *testing.T) {
 	}) {
 		t.Fatalf("pause after cancellation was not committed: %+v", stored)
 	}
-	if launcher.stops.Load() != 1 || vs.detaches.Load() != 1 {
-		t.Fatalf("stop/detach = %d/%d, want 1/1", launcher.stops.Load(), vs.detaches.Load())
+	// Ownership cleanup belongs to the coalesced retry worker, whose contract
+	// (startPausedCleanupRetry / DrainPauses) is lifecycle-bound: shutdown
+	// cancelled the lifecycle root before this Pause committed, so the worker
+	// abandons and the durable paused owner stays retained for startup
+	// reconciliation instead of fencing the runner in-process.
+	if launcher.stops.Load() != 0 || vs.detaches.Load() != 0 {
+		t.Fatalf("stop/detach = %d/%d, want 0/0 when lifecycle was cancelled before commit", launcher.stops.Load(), vs.detaches.Load())
+	}
+	if !pausedCleanupPending(stored) {
+		t.Fatalf("lifecycle-cancelled Pause did not retain the durable owner for reconciliation: %+v", stored)
 	}
 }
 

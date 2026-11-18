@@ -344,11 +344,10 @@ func TestPressurePauseUsesExistingCaptureAndConfirmedRelease(t *testing.T) {
 	if err := waitCheckpointResult(t, done); err != nil {
 		t.Fatal(err)
 	}
-	stored, err := o.st.Get(context.Background(), sb.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.State != types.StatePaused || !stored.ResourceObligation || stored.PauseReason != types.PauseReasonResource || !stored.ResumeSource.Valid() || pausedCleanupPending(stored) {
+	stored := waitForSandbox(t, o, context.Background(), sb.ID, func(current *types.Sandbox) bool {
+		return current.State == types.StatePaused && !pausedCleanupPending(current)
+	}, "resource pause ownership cleanup")
+	if !stored.ResourceObligation || stored.PauseReason != types.PauseReasonResource || !stored.ResumeSource.Valid() {
 		t.Fatal("current Pause did not commit resource source and clean ownership")
 	}
 	if lc.stops.Load() != 1 || vs.detaches.Load() != 1 || readCheckpointArgs(t, args)[0] != "snapshot" {
@@ -357,7 +356,7 @@ func TestPressurePauseUsesExistingCaptureAndConfirmedRelease(t *testing.T) {
 	if p := s.PressureSnapshot(); p.Paused != 1 || p.Cleanup != 1 || p.ReservedMemory != 512<<20 {
 		t.Fatalf("logical Pause claimed physical release: %+v", p)
 	}
-	if _, _, err = s.Release("live"); err != nil {
+	if _, _, err := s.Release("live"); err != nil {
 		t.Fatal(err)
 	}
 	if p := s.PressureSnapshot(); p.Pending != 1 || p.Cleanup != 0 || p.ReservedMemory != 0 || p.Zone != nodectl.ZoneCritical {
