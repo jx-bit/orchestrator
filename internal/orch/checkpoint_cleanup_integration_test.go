@@ -188,6 +188,19 @@ func TestCheckpointCleanupCLICommitAndRetry(t *testing.T) {
 					if kind == types.CaptureSnapshot {
 						want = types.ResumeSource{Kind: types.ResumeSourceSnapshot, Ref: produced.response.SnapshotRef, SandboxRef: produced.response.SandboxRef}
 					}
+					// Ownership cleanup is handed to the coalesced retry worker after
+					// the Pause response; wait for it to land before asserting the
+					// fence effects. On cleanup-failure the RunDir must stay retained;
+					// on success the RunDir must fully converge.
+					row = waitForSandbox(t, f.o, ctx, f.sb.ID, func(current *types.Sandbox) bool {
+						if current.State != types.StatePaused || current.RunID != "" || current.VswitchPort != "" {
+							return false
+						}
+						if outcome == "cleanup-failure" {
+							return current.RunDir == f.sb.RunDir
+						}
+						return current.RunDir == ""
+					}, "paused ownership cleanup convergence")
 					if pauseErr != nil || row.State != types.StatePaused || row.ResumeSource != want || row.RunID != "" || row.VswitchPort != "" {
 						t.Fatalf("committed Pause lost pair/runner fence: %+v want=%+v err=%v", row, want, pauseErr)
 					}

@@ -1359,11 +1359,12 @@ func TestPauseStartsLiveRetryForRetainedRunDir(t *testing.T) {
 	if _, err := o.Pause(context.Background(), sb.ID, apiKey, orchSnapshotCapture(sandboxcfg.SnapshotPolicy{})); err != nil {
 		t.Fatal(err)
 	}
-	paused, err := o.st.Get(context.Background(), sb.ID)
-	if err != nil || paused == nil || paused.State != types.StatePaused || paused.RunID != "" ||
-		paused.VswitchPort != "" || paused.RunDir != sb.RunDir {
-		t.Fatalf("paused row did not retain failed RunDir owner = %+v, %v", paused, err)
-	}
+	// The retry worker clears runner/network ownership asynchronously while the
+	// injected RunDir failure keeps the durable RunDir marker retained.
+	waitForSandbox(t, o, context.Background(), sb.ID, func(current *types.Sandbox) bool {
+		return current.State == types.StatePaused && current.RunID == "" &&
+			current.VswitchPort == "" && current.RunDir == sb.RunDir
+	}, "paused row retains failed RunDir owner with runner/network cleared")
 	o.pausedCleanupMu.Lock()
 	_, retrying := o.pausedCleanupActive[sb.ID]
 	o.pausedCleanupMu.Unlock()
