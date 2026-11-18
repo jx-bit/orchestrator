@@ -22,6 +22,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/kuasar-sandbox/orchestrator/internal/configsock"
+	"github.com/kuasar-sandbox/orchestrator/internal/nocgroup"
 	"github.com/kuasar-sandbox/orchestrator/internal/sandboxproc"
 	"github.com/kuasar-sandbox/orchestrator/internal/taskartifact"
 	"github.com/kuasar-sandbox/orchestrator/internal/types"
@@ -152,7 +153,11 @@ func launchTaskWith(ctx context.Context, stopContext func(), socket, sandboxID, 
 	if spec.Exec == "" {
 		return fmt.Errorf("launch spec has no exec")
 	}
-	if vmmCgroup == nil || vmmCgroup.Fd() < 3 {
+	if vmmCgroup != nil {
+		if vmmCgroup.Fd() < 3 {
+			return fmt.Errorf("launch task has no inheritable vmm cgroup descriptor")
+		}
+	} else if !nocgroup.Enabled() {
 		return fmt.Errorf("launch task has no inheritable vmm cgroup descriptor")
 	}
 	if arg, ok := launchSpecCgroupArg(spec.Args); ok {

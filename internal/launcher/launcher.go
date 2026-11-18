@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"syscall"
 
 	"github.com/coreos/go-systemd/v22/dbus"
 )
@@ -109,6 +110,51 @@ func (s *Systemd) lockStop(ctx context.Context, unit string) (func(), error) {
 			return nil, ctx.Err()
 		}
 	}
+}
+
+// StopNoWait issues a stop job and returns without waiting for it to finish.
+// Callers that only need to signal an exiting Type=exec unit use this to avoid
+// paying TimeoutStopSec when the unit's cgroup release is slow (for example a
+// delegated cgroup on a cgroup-v1 host).
+func (s *Systemd) StopNoWait(ctx context.Context, unit string) error {
+	ch := make(chan string, 1)
+	if _, err := s.conn.StopUnitContext(ctx, unit, "replace", ch); err != nil {
+		return fmt.Errorf("launcher: stop %s: %w", unit, err)
+	}
+	return nil
+}
+
+// UnitTasks returns the unit's current task count. Callers use TasksCurrent==0
+// as evidence that the unit's process tree is gone even when systemd has not
+// finished releasing the unit cgroup (and therefore still reports the unit as
+// deactivating).
+func (s *Systemd) UnitTasks(ctx context.Context, unit string) (uint64, error) {
+	prop, err := s.conn.GetServicePropertyContext(ctx, unit, "TasksCurrent")
+	if err != nil {
+		return 0, fmt.Errorf("launcher: unit %s TasksCurrent: %w", unit, err)
+	}
+	if prop == nil {
+		return 0, nil
+	}
+	switch v := prop.Value.Value().(type) {
+	case uint64:
+		return v, nil
+	case uint32:
+		return uint64(v), nil
+	case int64:
+		return uint64(v), nil
+	case int32:
+		return uint64(v), nil
+	default:
+		return 0, fmt.Errorf("launcher: unit %s TasksCurrent has type %T", unit, prop.Value.Value())
+	}
+}
+
+// Kill delivers signal sig to the unit's processes without waiting for the
+// unit to reach a dead state.
+func (s *Systemd) Kill(ctx context.Context, unit string, sig syscall.Signal) error {
+	s.conn.KillUnitContext(ctx, unit, int32(sig))
+	return nil
 }
 
 func (s *Systemd) ResetFailed(ctx context.Context, unit string) error {
