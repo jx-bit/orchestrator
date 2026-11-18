@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/kuasar-sandbox/orchestrator/internal/api"
 	"github.com/kuasar-sandbox/orchestrator/internal/launcher"
+	"github.com/kuasar-sandbox/orchestrator/internal/nocgroup"
 	"github.com/kuasar-sandbox/orchestrator/internal/nodepath"
 	"github.com/kuasar-sandbox/orchestrator/internal/types"
 	"github.com/kuasar-sandbox/orchestrator/internal/vswitch"
@@ -733,6 +735,46 @@ func (o *Orchestrator) fenceSandboxRunnerUnit(ctx context.Context, runID string)
 		// systemd may have collected the unit before trimming its delegated
 		// tree. Check the configured instances for this exact retained RunID.
 		return o.pruneSandboxCgroups(ctx, runID, "")
+	}
+	if nocgroup.Enabled() {
+		// No delegated cgroup exists in this mode: the runner is a Type=exec
+		// unit whose main process exits once sandbox-ctl returns. Deliver
+		// SIGKILL to the unit's tasks (the sandbox is already paused; nothing
+		// needs a graceful stop) and wait for the task count to reach zero
+		// instead of the unit's dead state. Processes hold the diffstore until
+		// they exit, so checkpoint cleanup needs them gone, while the unit's
+		// cgroup release can lag indefinitely on cgroup-v1 hosts.
+		if killer, ok := o.lc.(interface {
+			Kill(context.Context, string, syscall.Signal) error
+		}); ok {
+			_ = killer.Kill(ctx, unit, syscall.SIGKILL)
+		} else if stopper, ok := o.lc.(interface {
+			StopNoWait(context.Context, string) error
+		}); ok {
+			_ = stopper.StopNoWait(ctx, unit)
+		} else {
+			_ = o.lc.Stop(ctx, unit)
+		}
+		if counter, ok := o.lc.(interface {
+			UnitTasks(context.Context, string) (uint64, error)
+		}); ok {
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				tasks, err := counter.UnitTasks(ctx, unit)
+				if err == nil && tasks == 0 {
+					break
+				}
+				if time.Now().After(deadline) {
+					return fmt.Errorf("sandbox runner unit %s still has %d tasks", unit, tasks)
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(5 * time.Millisecond):
+				}
+			}
+		}
+		return nil
 	}
 	if err := o.lc.Stop(ctx, unit); err != nil {
 		active, listErr := o.sandboxUnitActive(ctx, unit)

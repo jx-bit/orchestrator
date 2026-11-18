@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kuasar-sandbox/orchestrator/internal/configsock"
+	"github.com/kuasar-sandbox/orchestrator/internal/nocgroup"
 	"golang.org/x/sys/unix"
 )
 
@@ -35,9 +36,13 @@ func runSandbox(args []string, log *slog.Logger) error {
 		return fmt.Errorf("run-sandbox: --pidfile, --config-socket, and --run-id required")
 	}
 	var session *configsock.RunSessionKeeper
+	prepareCgroup := func() (*os.File, error) { return prepareRunnerCgroup(*runID) }
+	if nocgroup.Enabled() {
+		prepareCgroup = func() (*os.File, error) { return nil, nil }
+	}
 	return runAssignedSandbox(*pidfile, *socket, *runID, runSandboxOps{
 		lockPidfile:   lockPidfile,
-		prepareCgroup: func() (*os.File, error) { return prepareRunnerCgroup(*runID) },
+		prepareCgroup: prepareCgroup,
 		openSession: func(ctx context.Context, socket, kind, runID string) (runSessionCloser, error) {
 			var err error
 			session, err = configsock.OpenRunSessionKeeperWithFeatures(ctx, socket, kind, runID, []string{configsock.FeatureCheckpointHolderRetirementV1})
@@ -76,7 +81,9 @@ func runAssignedSandbox(pidfile, socket, runID string, ops runSandboxOps) error 
 	if err != nil {
 		return fmt.Errorf("prepare runner cgroup: %w", err)
 	}
-	defer vmmCgroup.Close()
+	if vmmCgroup != nil {
+		defer vmmCgroup.Close()
+	}
 	if ops.openSession != nil {
 		session, err := ops.openSession(context.Background(), socket, "sandbox", runID)
 		if err != nil {

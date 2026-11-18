@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/kuasar-sandbox/orchestrator/internal/nocgroup"
 )
 
 // Start attaches trusted runtime descriptors and starts cmd. The caller owns
@@ -25,7 +27,11 @@ func Start(cmd *exec.Cmd, vmmCgroup, ready *os.File) error {
 	if cmd.Process != nil {
 		return fmt.Errorf("sandboxproc: command has already been started")
 	}
-	if !validDescriptor(vmmCgroup) {
+	if vmmCgroup != nil {
+		if !validDescriptor(vmmCgroup) {
+			return fmt.Errorf("sandboxproc: open VMM cgroup descriptor is required")
+		}
+	} else if !nocgroup.Enabled() {
 		return fmt.Errorf("sandboxproc: open VMM cgroup descriptor is required")
 	}
 	if !validDescriptor(ready) {
@@ -38,11 +44,14 @@ func Start(cmd *exec.Cmd, vmmCgroup, ready *os.File) error {
 			}
 		}
 	}
-	vmmFD := 3 + len(cmd.ExtraFiles)
-	cmd.ExtraFiles = append(cmd.ExtraFiles, vmmCgroup)
+	if vmmCgroup != nil {
+		vmmFD := 3 + len(cmd.ExtraFiles)
+		cmd.ExtraFiles = append(cmd.ExtraFiles, vmmCgroup)
+		cmd.Args = append(cmd.Args, fmt.Sprintf("--cgroup-path=fd=%d", vmmFD))
+	}
 	readyFD := 3 + len(cmd.ExtraFiles)
 	cmd.ExtraFiles = append(cmd.ExtraFiles, ready)
-	cmd.Args = append(cmd.Args, fmt.Sprintf("--cgroup-path=fd=%d", vmmFD), fmt.Sprintf("--ready-fd=%d", readyFD))
+	cmd.Args = append(cmd.Args, fmt.Sprintf("--ready-fd=%d", readyFD))
 	if err := cmd.Start(); err != nil {
 		return err
 	}

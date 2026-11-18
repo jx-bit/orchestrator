@@ -11,6 +11,8 @@ import (
 
 	rtconfig "github.com/kuasar-sandbox/sandboxer/pkg/config"
 	rtutil "github.com/kuasar-sandbox/sandboxer/pkg/util"
+
+	"github.com/kuasar-sandbox/orchestrator/internal/nocgroup"
 )
 
 const resourceFieldPath = NsResource
@@ -969,6 +971,17 @@ func ResolveResources(input ResourceResolveInput) (rtconfig.ResourcesConfig, err
 		resources.Startup = &rtconfig.StartupConfig{Memory: capacity.Memory}
 	}
 
+	if nocgroup.Enabled() {
+		// No-cgroup mode: cgroup-only policy cannot be applied. Omit the
+		// cgroup-dependent overhead/watermark settings and pin allocatable to
+		// capacity, which is sandbox-ctl's documented no-cgroup contract.
+		resources.Overhead = nil
+		resources.WatermarkHigh = nil
+		resources.Allocatable.CPU = float64(capacity.CPU)
+		resources.Allocatable.Memory = capacity.Memory
+		resources.Allocatable.DeflateOnOOM = nil
+	}
+
 	if err := ValidateResolvedResources(resources, input.Dynamic); err != nil {
 		return rtconfig.ResourcesConfig{}, err
 	}
@@ -1008,14 +1021,29 @@ func ValidateResolvedResources(resources rtconfig.ResourcesConfig, dynamic bool)
 	if allocMem > capMem {
 		return errors.New("resources.allocatable.memory must be <= resources.capacity.memory")
 	}
-	if resources.Overhead == nil {
-		return errors.New("resources.overhead.memory is required")
-	}
-	if _, err := positiveSize("resources.overhead.memory", resources.Overhead.Memory); err != nil {
-		return err
-	}
-	if resources.WatermarkHigh == nil || !positiveFinite(resources.WatermarkHigh.Ratio) || resources.WatermarkHigh.Ratio >= 1 {
-		return errors.New("resources.watermark_high.ratio must be > 0 and < 1")
+	if nocgroup.Enabled() {
+		// KUASAR_NO_CGROUP: only the no-cgroup subset is legal. sandbox-ctl
+		// rejects overhead/watermark without a cgroup and requires allocatable
+		// to equal capacity, so enforce the same shape here.
+		if resources.Overhead != nil || resources.WatermarkHigh != nil {
+			return errors.New("resources.overhead and resources.watermark_high must be omitted in no-cgroup mode")
+		}
+		if resources.Allocatable.CPU != float64(resources.Capacity.CPU) {
+			return errors.New("resources.allocatable.cpu must equal resources.capacity.cpu in no-cgroup mode")
+		}
+		if allocMem != capMem {
+			return errors.New("resources.allocatable.memory must equal resources.capacity.memory in no-cgroup mode")
+		}
+	} else {
+		if resources.Overhead == nil {
+			return errors.New("resources.overhead.memory is required")
+		}
+		if _, err := positiveSize("resources.overhead.memory", resources.Overhead.Memory); err != nil {
+			return err
+		}
+		if resources.WatermarkHigh == nil || !positiveFinite(resources.WatermarkHigh.Ratio) || resources.WatermarkHigh.Ratio >= 1 {
+			return errors.New("resources.watermark_high.ratio must be > 0 and < 1")
+		}
 	}
 	if resources.Control.Sensor != nil {
 		return errors.New("resources.control.sensor must remain omitted")

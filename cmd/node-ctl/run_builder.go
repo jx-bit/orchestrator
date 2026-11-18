@@ -52,6 +52,7 @@ import (
 
 	"github.com/kuasar-sandbox/orchestrator/internal/builder"
 	"github.com/kuasar-sandbox/orchestrator/internal/configsock"
+	"github.com/kuasar-sandbox/orchestrator/internal/nocgroup"
 	"github.com/kuasar-sandbox/orchestrator/internal/nodepath"
 	"github.com/kuasar-sandbox/orchestrator/internal/regcreds"
 	"github.com/kuasar-sandbox/orchestrator/internal/taskartifact"
@@ -75,11 +76,17 @@ func runBuilder(args []string, log *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	vmmCgroup, err := prepareBuilderCgroup(*runID)
-	if err != nil {
-		return fmt.Errorf("prepare builder cgroup: %w", err)
+	var vmmCgroup *os.File
+	if nocgroup.Enabled() {
+		log.Warn("KUASAR_NO_CGROUP=1: builder phases run without a delegated VMM cgroup")
+	} else {
+		var err error
+		vmmCgroup, err = prepareBuilderCgroup(*runID)
+		if err != nil {
+			return fmt.Errorf("prepare builder cgroup: %w", err)
+		}
+		defer vmmCgroup.Close()
 	}
-	defer vmmCgroup.Close()
 	session, err := configsock.OpenRunSessionKeeper(ctx, *socket, "build", *runID)
 	if err != nil {
 		return fmt.Errorf("open run session: %w", err)

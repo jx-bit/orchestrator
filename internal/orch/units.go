@@ -9,6 +9,7 @@ import (
 
 	"github.com/kuasar-sandbox/orchestrator/internal/config"
 	"github.com/kuasar-sandbox/orchestrator/internal/launcher"
+	"github.com/kuasar-sandbox/orchestrator/internal/nocgroup"
 	"github.com/kuasar-sandbox/orchestrator/internal/nodepath"
 )
 
@@ -126,6 +127,21 @@ func (o *Orchestrator) resourcePoolDropins() (map[string]string, error) {
 }
 
 func (o *Orchestrator) runnerUnitFile() string {
+	stopBlock := `TimeoutStopSec=20
+Slice=sandbox-runner.slice
+# node-ctl moves itself into ctl/ before enabling cgroup-v2 domain controllers;
+# node-ctl remains the resident ctl/ parent; its direct sandbox-ctl child uses the handed-off vmm/ descriptor for Cloud Hypervisor.
+Delegate=yes
+# KillMode=control-group recursively covers both delegated subgroups.
+`
+	if nocgroup.Enabled() {
+		stopBlock = `TimeoutStopSec=5
+Slice=sandbox-runner.slice
+# KUASAR_NO_CGROUP=1: no delegated cgroup is created. KillMode=control-group
+# still signals the whole unit process tree; the runner exits once sandbox-ctl
+# returns, and pause does not wait for the unit's cgroup release.
+`
+	}
 	return fmt.Sprintf(`[Unit]
 Description=kuasar sandbox runner %%i
 CollectMode=inactive-or-failed
@@ -141,16 +157,22 @@ ExecStopPost=/bin/rm -f %s
 # One resident node-ctl parent owns one direct sandbox-ctl child per assignment; runtime child exit is terminal for that exact run.
 Restart=no
 KillMode=control-group
-TimeoutStopSec=20
-Slice=sandbox-runner.slice
-# node-ctl moves itself into ctl/ before enabling cgroup-v2 domain controllers;
-# node-ctl remains the resident ctl/ parent; its direct sandbox-ctl child uses the handed-off vmm/ descriptor for Cloud Hypervisor.
-Delegate=yes
-# KillMode=control-group recursively covers both delegated subgroups.
-`, o.cfg.Paths.RunRoot, o.executables.OrchestratorCtl(), nodepath.RunnerPID(o.cfg.Paths.RunRoot, "%i"), o.cfg.Paths.ConfigSocket, nodepath.RunnerPID(o.cfg.Paths.RunRoot, "%i"))
+%s`, o.cfg.Paths.RunRoot, o.executables.OrchestratorCtl(), nodepath.RunnerPID(o.cfg.Paths.RunRoot, "%i"), o.cfg.Paths.ConfigSocket, nodepath.RunnerPID(o.cfg.Paths.RunRoot, "%i"), stopBlock)
 }
 
 func (o *Orchestrator) builderUnitFile() string {
+	stopBlock := `TimeoutStopSec=20
+Slice=sandbox-builder.slice
+# run-builder moves itself to ctl/ and hands the sibling vmm/ cgroup to each
+# strictly serial phase sandbox by inherited descriptor.
+Delegate=yes
+`
+	if nocgroup.Enabled() {
+		stopBlock = `TimeoutStopSec=5
+Slice=sandbox-builder.slice
+# KUASAR_NO_CGROUP=1: no delegated cgroup; run-builder exits after posting its result.
+`
+	}
 	return fmt.Sprintf(`[Unit]
 Description=kuasar image build runner %%i
 CollectMode=inactive-or-failed
@@ -175,11 +197,7 @@ LogRateLimitIntervalSec=0
 ExecStart=%s run-builder --pidfile=%s --config-socket=%s --run-id=%%i
 ExecStopPost=/bin/rm -f %s
 KillMode=control-group
-Slice=sandbox-builder.slice
-# run-builder moves itself to ctl/ and hands the sibling vmm/ cgroup to each
-# strictly serial phase sandbox by inherited descriptor.
-Delegate=yes
-`, o.cfg.Paths.RunRoot, o.executables.OrchestratorCtl(), nodepath.RunnerPID(o.cfg.Paths.RunRoot, "%i"), o.cfg.Paths.ConfigSocket, nodepath.RunnerPID(o.cfg.Paths.RunRoot, "%i"))
+%s`, o.cfg.Paths.RunRoot, o.executables.OrchestratorCtl(), nodepath.RunnerPID(o.cfg.Paths.RunRoot, "%i"), o.cfg.Paths.ConfigSocket, nodepath.RunnerPID(o.cfg.Paths.RunRoot, "%i"), stopBlock)
 }
 
 func sliceFile(desc string) string {
