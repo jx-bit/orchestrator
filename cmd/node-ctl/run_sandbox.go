@@ -14,6 +14,7 @@ import (
 
 	"github.com/kuasar-sandbox/orchestrator/internal/configsock"
 	"github.com/kuasar-sandbox/orchestrator/internal/nocgroup"
+	"github.com/kuasar-sandbox/orchestrator/internal/perfmark"
 	"golang.org/x/sys/unix"
 )
 
@@ -74,13 +75,17 @@ type runSandboxOps struct {
 }
 
 func runAssignedSandbox(pidfile, socket, runID string, ops runSandboxOps) error {
+	p := perfmark.Start("runner", "run-sandbox").Run(runID)
+	p.Mark("runner.begin")
 	if err := ops.lockPidfile(pidfile); err != nil {
 		return err
 	}
+	p.Mark("runner.pidfile")
 	vmmCgroup, err := ops.prepareCgroup()
 	if err != nil {
 		return fmt.Errorf("prepare runner cgroup: %w", err)
 	}
+	p.Mark("runner.cgroup")
 	if vmmCgroup != nil {
 		defer vmmCgroup.Close()
 	}
@@ -91,20 +96,25 @@ func runAssignedSandbox(pidfile, socket, runID string, ops runSandboxOps) error 
 		}
 		defer session.Close()
 	}
+	p.Mark("runner.session")
 	sid, err := waitSandboxAssignmentWithRetry(context.Background(), socket, runID, ops.waitAssignment)
 	if err != nil {
 		return fmt.Errorf("wait assignment: %w", err)
 	}
+	p.SID(sid).Mark("runner.assigned")
 	runRoot := filepath.Dir(filepath.Dir(pidfile))
 	ready, err := ops.connectReady(configsock.ReadinessSocketPath(runRoot, sid))
 	if err != nil {
 		return fmt.Errorf("connect readiness socket: %w", err)
 	}
+	p.Mark("runner.readiness_dial")
 	// The connection owns the bridge until child Start consumes it. Any config,
 	// chdir, argv, or Start failure returns through this defer and turns into EOF
 	// for the orchestrator instead of making it wait for the launch timeout.
 	defer ready.Close()
-	return ops.launchTask(socket, sid, runID, ready, vmmCgroup)
+	err = ops.launchTask(socket, sid, runID, ready, vmmCgroup)
+	p.Mark("runner.task_returned")
+	return err
 }
 
 func waitSandboxAssignmentWithRetry(ctx context.Context, socket, runID string, wait func(context.Context, string, string, string) (string, error)) (string, error) {

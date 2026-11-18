@@ -21,6 +21,7 @@ import (
 	"github.com/kuasar-sandbox/orchestrator/internal/buildcfg"
 	"github.com/kuasar-sandbox/orchestrator/internal/execsession"
 	"github.com/kuasar-sandbox/orchestrator/internal/migrationtoken"
+	"github.com/kuasar-sandbox/orchestrator/internal/perfmark"
 	"github.com/kuasar-sandbox/orchestrator/internal/sandboxcfg"
 	"github.com/kuasar-sandbox/orchestrator/internal/strictjson"
 	"github.com/kuasar-sandbox/orchestrator/internal/types"
@@ -580,6 +581,8 @@ func apiKeyFrom(ctx context.Context) string {
 // --- handlers ---
 
 func (a *API) create(w http.ResponseWriter, r *http.Request) {
+	p := perfmark.Start("api", "create")
+	p.Mark("api.recv")
 	var body struct {
 		CreateReq
 		RemovedMaxCheckpoints json.RawMessage `json:"max_checkpoints"`
@@ -631,11 +634,15 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	p.Mark("api.decoded")
+	tCore := time.Now()
 	sb, err := a.core.Create(r.Context(), req)
+	p.Dur("api.core", tCore)
 	if err != nil {
 		a.fail(w, err)
 		return
 	}
+	p.SID(sb.ID).Mark("api.response")
 	writeJSON(w, 201, a.sandboxResp(sb))
 }
 
@@ -700,6 +707,8 @@ func (a *API) kill(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) connect(w http.ResponseWriter, r *http.Request) {
+	p := perfmark.Start("api", "resume").SID(r.PathValue("id"))
+	p.Mark("api.recv")
 	migrationToken := r.Header.Get(MigrationTokenHeader)
 	var body struct {
 		Timeout  int               `json:"timeout"`
@@ -725,6 +734,8 @@ func (a *API) connect(w http.ResponseWriter, r *http.Request) {
 	// Defer duplicate/value validation to the standalone import path; an empty
 	// sentinel is malformed if import really happens and harmless if ignored.
 	header := deferredOptionalHeader(r.Header, mmdsHeader)
+	p.Mark("api.decoded")
+	tCore := time.Now()
 	var sb *types.Sandbox
 	var err error
 	if standalone, ok := a.core.(ConnectMMDSCore); ok {
@@ -749,6 +760,8 @@ func (a *API) connect(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	p.Dur("api.core", tCore)
+	p.Mark("api.response")
 	writeJSON(w, 200, a.sandboxResp(sb))
 }
 
@@ -821,6 +834,8 @@ func (a *API) failExecSession(w http.ResponseWriter, err error) {
 }
 
 func (a *API) pause(w http.ResponseWriter, r *http.Request) {
+	p := perfmark.Start("api", "pause").SID(r.PathValue("id"))
+	p.Mark("api.recv")
 	r = r.WithContext(sandboxcfg.WithPauseReceipt(r.Context(), time.Now()))
 	if r.ContentLength > maxPauseRequestBytes {
 		writeErr(w, http.StatusRequestEntityTooLarge, "request body too large")
@@ -862,9 +877,13 @@ func (a *API) pause(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "snapshot-only checkpoint options require memory=true")
 		return
 	}
+	p.Mark("api.decoded")
+	tCore := time.Now()
 	checkpointID, err := a.core.Pause(r.Context(), r.PathValue("id"), apiKeyFrom(r.Context()), sandboxcfg.CaptureRequest{
 		Kind: kind, SnapshotPolicy: override, Checkpoint: req.Checkpoint, IfIdle: req.IfIdle, IfIdleSince: req.IfIdleSince,
 	})
+	p.Dur("api.core", tCore)
+	p.Mark("api.response")
 	switch {
 	case errors.Is(err, ErrPreviousMemorySavePending), errors.Is(err, ErrPauseRunChanged):
 		writeErr(w, http.StatusConflict, err.Error())

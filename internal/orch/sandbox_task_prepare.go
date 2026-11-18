@@ -14,6 +14,7 @@ import (
 	"github.com/kuasar-sandbox/orchestrator/internal/configresolve"
 	"github.com/kuasar-sandbox/orchestrator/internal/configsock"
 	"github.com/kuasar-sandbox/orchestrator/internal/nodectl"
+	"github.com/kuasar-sandbox/orchestrator/internal/perfmark"
 	"github.com/kuasar-sandbox/orchestrator/internal/sandboxcfg"
 	"github.com/kuasar-sandbox/orchestrator/internal/store"
 	"github.com/kuasar-sandbox/orchestrator/internal/types"
@@ -391,6 +392,8 @@ func (o *Orchestrator) launchArtifactSandbox(ctx context.Context, attempt *launc
 	o.logLaunchPhase(attempt, sb, "host_resource_network_prepare_duration", time.Since(hostPrepareStarted))
 	o.logLaunchPhase(attempt, sb, "prepare_duration", time.Since(prepareStarted))
 
+	lp := perfmark.Start("orch", "launch-tail").SID(sb.ID)
+	tailStarted := time.Now()
 	runtimeStarted := time.Now()
 	err = awaitArtifactReadinessResult(launchCtx, readinessResult)
 	o.logLaunchPhase(attempt, sb, "runtime_ready_duration", time.Since(runtimeStarted))
@@ -400,15 +403,19 @@ func (o *Orchestrator) launchArtifactSandbox(ctx context.Context, attempt *launc
 	if err := o.requirePreviousMemorySaveSupport(launchCtx, sb); err != nil {
 		return launchFailed("runtime", err)
 	}
+	lp.Dur("tail.readiness_wait", runtimeStarted)
+	tBinds := time.Now()
 	for _, b := range binds {
 		if err := o.bindWorkspaceDisk(launchCtx, sb, b, *b.Disk, b.RefLocations); err != nil {
 			return launchFailed("workspace_attach", err)
 		}
 	}
+	lp.Dur("tail.workspace_bind", tBinds)
 	if tmpl.Profile == types.ProfileE2B {
 		envdStarted := time.Now()
 		err = o.envdInit(launchCtx, sb)
 		o.logLaunchPhase(attempt, sb, "envd_init_duration", time.Since(envdStarted))
+		lp.Dur("tail.envd_init", envdStarted)
 		if err != nil {
 			return launchFailed("init", err)
 		}
@@ -422,7 +429,9 @@ func (o *Orchestrator) launchArtifactSandbox(ctx context.Context, attempt *launc
 	if summary.DerivedSandboxRef != "" {
 		committedSource.Ref = summary.DerivedSandboxRef
 	}
+	tCommit := time.Now()
 	changed, err = o.st.CommitPreparedRunning(launchCtx, sb, summary.RootSource, summary.DerivedSandboxRef)
+	lp.Dur("tail.commit_store", tCommit)
 	if err != nil {
 		return launchFailed("runtime", fmt.Errorf("orch: commit launch %s: %w", sb.ID, err))
 	}
@@ -459,8 +468,11 @@ func (o *Orchestrator) launchArtifactSandbox(ctx context.Context, attempt *launc
 	sb.ResumeSource = committedSource
 	sb.LaunchMode = ""
 	sb.DeadlineUnix = running.DeadlineUnix
+	tPublish := time.Now()
 	o.publishUpsert(running)
 	o.observeSandboxUpsert(running)
+	lp.Dur("tail.publish", tPublish)
+	lp.Dur("tail.total", tailStarted)
 	return nil
 }
 

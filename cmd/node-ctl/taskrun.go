@@ -23,6 +23,7 @@ import (
 
 	"github.com/kuasar-sandbox/orchestrator/internal/configsock"
 	"github.com/kuasar-sandbox/orchestrator/internal/nocgroup"
+	"github.com/kuasar-sandbox/orchestrator/internal/perfmark"
 	"github.com/kuasar-sandbox/orchestrator/internal/sandboxproc"
 	"github.com/kuasar-sandbox/orchestrator/internal/taskartifact"
 	"github.com/kuasar-sandbox/orchestrator/internal/types"
@@ -86,10 +87,14 @@ func launchTaskWith(ctx context.Context, stopContext func(), socket, sandboxID, 
 	if ops.log == nil {
 		ops.log = slog.Default()
 	}
+	p := perfmark.Start("runner", "launch-task").SID(sandboxID).Run(runID)
+	p.Mark("task.begin")
+	tBootstrap := time.Now()
 	bootstrap, err := ops.fetchBootstrap(ctx, socket, sandboxID, runID)
 	if err != nil {
 		return fmt.Errorf("fetch sandbox task bootstrap: %w", err)
 	}
+	p.Dur("task.bootstrap", tBootstrap)
 	if bootstrap.SandboxID != sandboxID || bootstrap.RunID != runID {
 		return fmt.Errorf("sandbox task bootstrap identity mismatch")
 	}
@@ -130,22 +135,26 @@ func launchTaskWith(ctx context.Context, stopContext func(), socket, sandboxID, 
 	locations := map[string]string{}
 	var preparedSource types.ResumeSource
 	if bootstrap.Prepare != nil {
+		tArtifact := time.Now()
 		result, err := ops.prepareArtifact(taskCtx, *bootstrap.Prepare)
 		if err != nil {
 			ops.log.Error("sandbox task artifact prepare failed", "sid", sandboxID, "run_id", runID,
 				"task_artifact_prepare_error_total", 1, "stage", "artifact_prepare", "err", err)
 			return err
 		}
+		p.Dur("task.artifact", tArtifact)
 		locations = result.RefLocationURIs
 		preparedSource = result.PreparedSource
 		ops.log.Info("sandbox task artifact prepared", "sid", sandboxID, "run_id", runID,
 			"task_artifact_prepare_duration", result.PrepareDuration,
 			"task_artifact_config_read_duration", result.ConfigReadDuration,
 			"task_artifact_ref_count", result.Summary.RequiredRefCount)
+		tComplete := time.Now()
 		spec, err = completeSandboxPrepareWithRetry(taskCtx, socket, sandboxID, runID, result.Summary, ops.completePrepare)
 		if err != nil {
 			return fmt.Errorf("complete sandbox artifact preparation: %w", err)
 		}
+		p.Dur("task.complete_prepare", tComplete)
 	}
 	if spec == nil {
 		return fmt.Errorf("sandbox task has no final launch spec")
@@ -200,7 +209,10 @@ func launchTaskWith(ctx context.Context, stopContext func(), socket, sandboxID, 
 	if ops.startChild == nil {
 		return errors.New("sandbox child starter is not configured")
 	}
-	return ops.startChild(spec.Exec, argv, env, vmmCgroup, ready)
+	p.Mark("task.spawn_child")
+	err = ops.startChild(spec.Exec, argv, env, vmmCgroup, ready)
+	p.Mark("task.end")
+	return err
 }
 
 func completeSandboxPrepareWithRetry(

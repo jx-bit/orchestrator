@@ -8,6 +8,7 @@ import (
 
 	"github.com/kuasar-sandbox/orchestrator/internal/api"
 	"github.com/kuasar-sandbox/orchestrator/internal/idleclock"
+	"github.com/kuasar-sandbox/orchestrator/internal/perfmark"
 	"github.com/kuasar-sandbox/orchestrator/internal/routesync"
 	"github.com/kuasar-sandbox/orchestrator/internal/sandboxcfg"
 	"github.com/kuasar-sandbox/orchestrator/internal/types"
@@ -20,10 +21,13 @@ func (o *Orchestrator) preparePause(ctx context.Context, sb *types.Sandbox, requ
 		return api.ErrProxyUnavailable
 	}
 	started := time.Now()
+	p := perfmark.Start("orch", "pause-barrier").SID(sb.ID)
+	p.Mark("barrier.start")
 	barrier, err := o.pauseBarriers.BeginProxyPauseBarrier()
 	if err != nil {
 		return errors.Join(api.ErrProxyUnavailable, err)
 	}
+	p.Mark("barrier.begin")
 	defer barrier.Cancel()
 	if request.IdleSinceBootNS > 0 {
 		single, ok := barrier.(interface{ RequireSingleProxy() error })
@@ -62,6 +66,7 @@ func (o *Orchestrator) preparePause(ctx context.Context, sb *types.Sandbox, requ
 	if err := barrier.Wait(waitCtx); err != nil {
 		return errors.Join(api.ErrProxyUnavailable, err)
 	}
+	p.Mark("barrier.wait_done")
 	if err := waitCtx.Err(); err != nil {
 		return errors.Join(api.ErrProxyUnavailable, err)
 	}
@@ -87,6 +92,7 @@ func (o *Orchestrator) preparePause(ctx context.Context, sb *types.Sandbox, requ
 	if err := barrier.Commit(); err != nil {
 		return errors.Join(api.ErrProxyUnavailable, err)
 	}
+	p.Mark("barrier.commit")
 	for _, intent := range beforeCapture {
 		if err := intent(); err != nil {
 			return err
@@ -103,6 +109,7 @@ func (o *Orchestrator) preparePause(ctx context.Context, sb *types.Sandbox, requ
 	}
 	o.cache(pending)
 	o.observeSandboxUpsert(pending)
+	p.Mark("barrier.end")
 	return nil
 }
 
