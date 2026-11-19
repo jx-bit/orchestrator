@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/kuasar-sandbox/orchestrator/internal/childenv"
 	"github.com/kuasar-sandbox/orchestrator/internal/configsock"
 	"github.com/kuasar-sandbox/orchestrator/internal/nocgroup"
 	"github.com/kuasar-sandbox/orchestrator/internal/perfmark"
@@ -27,6 +28,14 @@ import (
 	"github.com/kuasar-sandbox/orchestrator/internal/taskartifact"
 	"github.com/kuasar-sandbox/orchestrator/internal/types"
 )
+
+// sandboxRuntimeGOMAXPROCS caps the scheduler width of the per-task
+// sandbox-ctl child. create/resume exec a fresh helper every time; on
+// many-core hosts the default GOMAXPROCS costs 15-20 ms of Go runtime
+// initialization before restore.begin. The process only serves one sandbox
+// and is almost entirely wait-bound, so a small cap is ample. See
+// kuasar-sandbox issue #6.
+const sandboxRuntimeGOMAXPROCS = "4"
 
 // launchTask fetches the already-authenticated exact-run bootstrap, performs
 // optional task-local artifact preparation, and starts the sandbox-ctl child.
@@ -188,6 +197,7 @@ func launchTaskWith(ctx context.Context, stopContext func(), socket, sandboxID, 
 	argv = appendRefLocationArgs(argv, locations)
 	authoritativeEnv := mergeAuthoritativeEnv(spec.Env, bootstrap.Env)
 	env := taskEnv(authoritativeEnv)
+	env = childenv.GOMAXPROCS(env, sandboxRuntimeGOMAXPROCS)
 	// Preparation cancellation must not become the runtime lifetime. The
 	// sole spawn boundary derives child FD numbers and owns readiness Close.
 	cancelDeadline()

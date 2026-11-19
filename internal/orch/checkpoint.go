@@ -8,10 +8,20 @@ import (
 	"os"
 	"os/exec"
 
+	"github.com/kuasar-sandbox/orchestrator/internal/childenv"
 	"github.com/kuasar-sandbox/orchestrator/internal/nodepath"
 	"github.com/kuasar-sandbox/orchestrator/internal/types"
 	"github.com/kuasar-sandbox/sandboxer/pkg/artifact"
 )
+
+// checkpointHelperGOMAXPROCS caps the scheduler width of the node-ctl
+// checkpoint-cleanup helper: another short-lived Go child whose runtime
+// initialization otherwise pays the many-core start tax on every pause
+// cleanup. Since pause hands cleanup to the background retry worker this no
+// longer sits on the response path, but the worker still runs it while later
+// resumes wait on the lifecycle lock, so a faster helper shortens that
+// window. See kuasar-sandbox issue #6.
+const checkpointHelperGOMAXPROCS = "4"
 
 // cleanupCheckpoint runs under the SID lifecycle lock, after runner fencing,
 // while RunDir still durably owns paused cleanup. Artifact interpretation stays
@@ -80,7 +90,7 @@ func (o *Orchestrator) inspectOrCleanupCheckpoint(ctx context.Context, sb *types
 	}
 	cmd := exec.CommandContext(ctx, o.executables.OrchestratorCtl(), args...)
 	inheritSourceOperation(ctx, cmd)
-	cmd.Env = append(os.Environ(), "MANIFEST_KEY="+sb.ManifestKey)
+	cmd.Env = append(childenv.GOMAXPROCS(os.Environ(), checkpointHelperGOMAXPROCS), "MANIFEST_KEY="+sb.ManifestKey)
 	var stderr, stdout bytes.Buffer
 	cmd.Stderr = &stderr
 	cmd.Stdout = &stdout
