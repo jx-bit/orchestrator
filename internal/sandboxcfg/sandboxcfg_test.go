@@ -116,6 +116,50 @@ func TestNormalizeRestoreMetadata(t *testing.T) {
 	}
 }
 
+func TestNormalizeRestoreMetadataPrefill(t *testing.T) {
+	original := map[string]string{NsRestore: ` { "prefill" : "self" } `, "keep": "value"}
+	got, err := NormalizeRestoreMetadata(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[NsRestore] != `{"prefill":"self"}` || got["keep"] != "value" {
+		t.Fatalf("normalized prefill metadata = %+v", got)
+	}
+	if original[NsRestore] == got[NsRestore] {
+		t.Fatal("normalization mutated or reused the caller's restore value")
+	}
+	combined := map[string]string{NsRestore: ` {"prefetch" : "memory", "prefill" : "self" } `}
+	got, err = NormalizeRestoreMetadata(combined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[NsRestore] != `{"prefetch":"memory","prefill":"self"}` {
+		t.Fatalf("combined normalization = %+v", got)
+	}
+	// prefill alone must survive without prefetch
+	got, err = NormalizeRestoreMetadata(map[string]string{NsRestore: `{"prefill":"self"}`})
+	if err != nil || got[NsRestore] != `{"prefill":"self"}` {
+		t.Fatalf("prefill-only metadata: got=%v err=%v", got, err)
+	}
+
+	bad := map[string]string{
+		"bad-enum":       `{"prefill":"memory"}`,
+		"empty-enum":     `{"prefill":""}`,
+		"non-string":     `{"prefill":true}`,
+		"null-prefill":   `{"prefill":null}`,
+		"object-prefill": `{"prefill":{}}`,
+		"wrong-case":     `{"Prefill":"self"}`,
+		"mixed-bad":      `{"prefetch":"memory","prefill":"disk"}`,
+	}
+	for name, raw := range bad {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NormalizeRestoreMetadata(map[string]string{NsRestore: raw}); err == nil {
+				t.Fatalf("accepted invalid prefill value %q", raw)
+			}
+		})
+	}
+}
+
 func TestParseSpecNetworkValidation(t *testing.T) {
 	for name, bad := range map[string]string{
 		"bad-json":    `{not json`,
@@ -439,6 +483,60 @@ func TestBuildRendersPrefetchOnlyForRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(b), `prefetch: "off"`) {
+		t.Fatalf("snapshot restore omitted explicit off policy:\n%s", b)
+	}
+}
+
+func TestBuildRendersPrefillOnlyForRestore(t *testing.T) {
+	cold := baseParams(types.ProfileE2B)
+	cold.Spec.Restore.Prefill = "self"
+	b, err := cold.BuildYAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "prefill:") || strings.Contains(string(b), "restore:") {
+		t.Fatalf("cold boot rendered restore policy:\n%s", b)
+	}
+
+	restore := baseParams(types.ProfileE2B)
+	restore.Template.Kind = types.KindSnp
+	restore.Sandbox.TemplateID = restore.Template.String()
+	restore.Sandbox.LaunchMode = types.LaunchMemory
+	restore.ArtifactDisks = types.ArtifactDiskTopology{
+		Root: types.ArtifactDiskShape{Mode: types.ArtifactDiskOverlay, HasActiveBase: true},
+	}
+	restore.Spec.Restore.Prefill = "self"
+	b, err = restore.BuildYAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "restore:") || !strings.Contains(string(b), "prefill: self") {
+		t.Fatalf("snapshot restore omitted prefill policy:\n%s", b)
+	}
+
+	resume := baseParams(types.ProfileE2B)
+	resume.Sandbox.ResumeSource = types.ResumeSource{SandboxRef: "manifest://eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		Kind: types.ResumeSourceSnapshot, Ref: "manifest://" + strings.Repeat("b", 64),
+	}
+	resume.Sandbox.LaunchMode = types.LaunchMemory
+	resume.ArtifactDisks = types.ArtifactDiskTopology{
+		Root: types.ArtifactDiskShape{Mode: types.ArtifactDiskOverlay, HasActiveBase: true},
+	}
+	resume.Spec.Restore.Prefill = "self"
+	b, err = resume.BuildYAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "restore:") || !strings.Contains(string(b), "prefill: self") {
+		t.Fatalf("paused image resume omitted prefill policy:\n%s", b)
+	}
+
+	restore.Spec.Restore.Prefill = "off"
+	b, err = restore.BuildYAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `prefill: "off"`) {
 		t.Fatalf("snapshot restore omitted explicit off policy:\n%s", b)
 	}
 }

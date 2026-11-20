@@ -49,9 +49,10 @@ type NetworkSpec struct {
 	TransitMAC       string   `json:"transit_mac,omitempty" yaml:"transit_mac,omitempty"`
 }
 
-// RestoreSpec is the tenant-selectable restore prefetch request.
+// RestoreSpec is the tenant-selectable restore policy request.
 type RestoreSpec struct {
 	Prefetch string `json:"prefetch,omitempty"`
+	Prefill  string `json:"prefill,omitempty"`
 }
 
 // TapFD is the node-managed tapfd transport rendered into runtime config.
@@ -175,8 +176,9 @@ func ValidateWorkspaceMetadata(spec SandboxSpec) error {
 
 // NormalizeRestoreMetadata validates and canonicalizes only the restore
 // namespace. An absent namespace is left absent. When it is present, the value
-// must be one JSON object containing only an optional prefetch field whose value
-// is "off" or "memory". When the namespace is present, the returned map is a
+// must be one JSON object containing only optional prefetch and prefill fields
+// whose values are the sandboxer restore modes ("off"/"memory" and
+// "off"/"self"). When the namespace is present, the returned map is a
 // clone so callers never mutate a request, template, or stored record while
 // validating it.
 func NormalizeRestoreMetadata(meta map[string]string) (map[string]string, error) {
@@ -211,29 +213,46 @@ func parseRestore(raw string) (RestoreSpec, error) {
 		return restore, fmt.Errorf("sandboxcfg: metadata[%q] is not a valid JSON object: %w", NsRestore, err)
 	}
 	for field := range object {
-		if field != "prefetch" {
+		if field != "prefetch" && field != "prefill" {
 			return restore, fmt.Errorf("sandboxcfg: metadata[%q] contains unknown field %q", NsRestore, field)
 		}
 	}
 	prefetch, ok := object["prefetch"]
-	if !ok {
-		return restore, nil
+	if ok {
+		var value any
+		if err := json.Unmarshal(prefetch, &value); err != nil {
+			return restore, fmt.Errorf("sandboxcfg: metadata[%q].prefetch is invalid: %w", NsRestore, err)
+		}
+		mode, ok := value.(string)
+		if !ok {
+			return restore, fmt.Errorf("sandboxcfg: metadata[%q].prefetch must be a string", NsRestore)
+		}
+		if mode == "" {
+			return restore, fmt.Errorf("sandboxcfg: metadata[%q].prefetch %q invalid (want off|memory)", NsRestore, mode)
+		}
+		if _, err := rtconfig.ParsePrefetchMode(mode); err != nil {
+			return restore, fmt.Errorf("sandboxcfg: metadata[%q].prefetch %q invalid (want off|memory)", NsRestore, mode)
+		}
+		restore.Prefetch = mode
 	}
-	var value any
-	if err := json.Unmarshal(prefetch, &value); err != nil {
-		return restore, fmt.Errorf("sandboxcfg: metadata[%q].prefetch is invalid: %w", NsRestore, err)
+	prefill, ok := object["prefill"]
+	if ok {
+		var value any
+		if err := json.Unmarshal(prefill, &value); err != nil {
+			return restore, fmt.Errorf("sandboxcfg: metadata[%q].prefill is invalid: %w", NsRestore, err)
+		}
+		mode, ok := value.(string)
+		if !ok {
+			return restore, fmt.Errorf("sandboxcfg: metadata[%q].prefill must be a string", NsRestore)
+		}
+		if mode == "" {
+			return restore, fmt.Errorf("sandboxcfg: metadata[%q].prefill %q invalid (want off|self)", NsRestore, mode)
+		}
+		if _, err := rtconfig.ParsePrefillMode(mode); err != nil {
+			return restore, fmt.Errorf("sandboxcfg: metadata[%q].prefill %q invalid (want off|self)", NsRestore, mode)
+		}
+		restore.Prefill = mode
 	}
-	mode, ok := value.(string)
-	if !ok {
-		return restore, fmt.Errorf("sandboxcfg: metadata[%q].prefetch must be a string", NsRestore)
-	}
-	if mode == "" {
-		return restore, fmt.Errorf("sandboxcfg: metadata[%q].prefetch %q invalid (want off|memory)", NsRestore, mode)
-	}
-	if _, err := rtconfig.ParsePrefetchMode(mode); err != nil {
-		return restore, fmt.Errorf("sandboxcfg: metadata[%q].prefetch %q invalid (want off|memory)", NsRestore, mode)
-	}
-	restore.Prefetch = mode
 	return restore, nil
 }
 
@@ -514,6 +533,7 @@ func (p Params) buildImageColdConfig() (*rtconfig.SandboxConfig, error) {
 	// retaining the policy in Sandbox.Metadata for a later pause/resume.
 	if p.RestoreRef() != "" {
 		c.Restore.Prefetch = p.Spec.Restore.Prefetch
+		c.Restore.Prefill = p.Spec.Restore.Prefill
 	}
 	// Cold boot needs a pre-formatted ext4 source for the writable upper; restore
 	// gets the overlay chain from the snapshot.
@@ -567,7 +587,7 @@ func (p Params) BuildSandboxHostConfig() (*SandboxHostConfig, error) {
 		Usage:          usage,
 		Network:        p.buildRuntimeNetwork(),
 		Boot:           boot,
-		Restore:        rtconfig.RestoreConfig{Prefetch: p.Spec.Restore.Prefetch},
+		Restore:        rtconfig.RestoreConfig{Prefetch: p.Spec.Restore.Prefetch, Prefill: p.Spec.Restore.Prefill},
 		EphemeralFiles: guestFiles(p.Network.Hostname, p.Network.DNS),
 	}
 	// A new Sandbox-template Create may intentionally persist request launch,
@@ -623,7 +643,7 @@ func (p Params) BuildSnapshotHostConfig() (*SnapshotHostConfig, error) {
 		Usage:     usage,
 		Network:   p.buildRuntimeNetwork(),
 		Boot:      boot,
-		Restore:   rtconfig.RestoreConfig{Prefetch: p.Spec.Restore.Prefetch},
+		Restore:   rtconfig.RestoreConfig{Prefetch: p.Spec.Restore.Prefetch, Prefill: p.Spec.Restore.Prefill},
 	}, nil
 }
 
